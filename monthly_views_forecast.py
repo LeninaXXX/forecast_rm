@@ -307,7 +307,7 @@ if __name__ == '__main__':
         return ed
 
     parser.add_argument('-s', '--start-date', type=date.fromisoformat)
-    parser.add_argument('-e', '--end-date', type=date.fromisoformat)
+    parser.add_argument('-e', '--end-date', type=end_date)
     parser.add_argument('-v', '--verbose', action='store_true')
     parser.add_argument('-d', '--debug', action='store_true')
     
