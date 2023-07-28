@@ -1,1 +1,1 @@
-venv/Scripts/activate && python monthly_views_forecast.py -s 2023-01-01 -e today -v && exit
+venv\Scripts\activate && python monthly_views_forecast.py -s 2023-01-01 -e today -v && exit
