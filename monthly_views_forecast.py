@@ -1,7 +1,8 @@
-import itertools as it
+import argparse
 import logging
 import os
 import decimal
+import itertools as it
 
 from datetime import datetime, date
 from dateutil.relativedelta import relativedelta
@@ -147,12 +148,14 @@ class RatioPredictor(Predictor):
             return (None, None)
 
     def _ratio(self, day):
-        partial, monthly = self._historic(day - relativedelta(years=1))
+        # partial, monthly = self._historic(day - relativedelta(years=1))
+        partial, monthly = self._historic(day) # - relativedelta(years=1))
         
         if partial and monthly:
             return partial['Users']/monthly['Users']
         else:
             logging.error(f'Unable to calculate partial_montly to monthly ratio')
+            logging.error(f'\tday == {day}')
             logging.error(f'\t')
             return None
 
@@ -190,8 +193,14 @@ class RatioPredictor(Predictor):
             logging.error(f'\t')
             return None
 
-def main():
+def main(start_date=None, end_date=None, verbose=None, debug=None):
+    print(f'start_date : {start_date}')
+    print(f'end_date : {end_date}')
+    print(f'verbose : {verbose}')
+    print(f'debug : {debug}')
+
     # pull tables from server
+    #   connect to server
     try:
         logging.info("Connecting to database...")
         conn = pyodbc.connect(
@@ -217,7 +226,7 @@ def main():
     }
     for db_table_name in db_tbls_names:
         time_start = datetime.now()
-        
+
         logging.info(f'Retrieving {db_table_name}, at time {time_start}')
         try:
             curr = cursor.execute(f"SELECT Users, Sessions, Pageviews, FechaFiltro, FechaCreacion FROM {db_table_name}"
@@ -228,7 +237,7 @@ def main():
             logging.error(f'Exception while executing SQL statement for table {db_table_name}')
             logging.error(f'\tEXCEPTION INFORMATION:', exc_info=exc)
             raise
-
+        #   normalize datatypes
         running_tables[db_table_name] = SortedTable(
             db_table_name,
             db_tables[db_table_name],
@@ -236,40 +245,75 @@ def main():
             sort_func=lambda x: x['FechaFiltro']
         )
         time_end = datetime.now()
+
         logging.info(f'\t... got {db_table_name}, at time {time_end}. Took: {time_end - time_start}')
         logging.info(f'\tRows on Database Table {db_table_name} :: {len(db_tables[db_table_name])}')
         logging.info(f'\tRows on Running Table {db_table_name} :: {len(running_tables[db_table_name])}')
         logging.info(f'\tRunning Table {db_table_name} :: {"is" if running_tables[db_table_name].check_consistency() else "IS NOT"} consistent')
 
     predictor = RatioPredictor(running_tables)
+ 
+    # -------------------------------------------------------------------------
+    for predict_for_date in daterange(
+        start_date, 
+        end_date
+    ):
+        # predict_for_date = running_tables['GA_DIARIO'][-2]['FechaFiltro']
 
-    last_valid_date = running_tables['GA_DIARIO'][-2]['FechaFiltro']
-    
-    UKEY = date.today().strftime('%Y%m%d')
-    
-    Forecast_w_1y = predictor.predict(last_valid_date)
-    
-    Forecast_w_2y = predictor.predict_w(last_valid_date, 0.5)
-    
-    Forecast_w_2y_optimal = 0   # TODO -- Placeholder: predictor.predict_w(last_valid_date, w) where w better adjust for a given period
-    Weight = 0.0
+        # UKEY = date.today().strftime('%Y%m%d')
+        UKEY = predict_for_date.strftime('%Y%m%d')
 
-    FechaFiltro = date.today().replace(day=1) + relativedelta(months=+1, days=-1)
-    # FechaCreacion = datetime.now().replace(microsecond=0)
-    FechaCreacion = datetime.now().isoformat(timespec='milliseconds')
+        Forecast_w_1y = predictor.predict(predict_for_date)
+        Forecast_w_2y = predictor.predict_w(predict_for_date, 0.5)
+        Forecast_w_2y_optimal = 0   # TODO -- Placeholder: predictor.predict_w(last_valid_date, w) where w better adjust for a given period
+        Weight = 0.0    
 
-    print()
-    print(f"('{UKEY}', {Forecast_w_1y}, {Forecast_w_2y}, {Forecast_w_2y_optimal}, {Weight}, '{FechaFiltro}', '{FechaCreacion}')")
-    print()
+        # FechaFiltro = date.today().replace(day=1) + relativedelta(months=+1, days=-1)
+        FechaFiltro = (_ := predict_for_date).replace(day=1) + relativedelta(months=+1) - relativedelta(days=1)
+        FechaCreacion = datetime.now().isoformat(timespec='milliseconds')
+    
+        if verbose:
+            print(f"('{UKEY}', {Forecast_w_1y}, {Forecast_w_2y}, {Forecast_w_2y_optimal}, {Weight}, '{FechaFiltro}', '{FechaCreacion}')")
 
-    try:
-        curr = cursor.execute(f"INSERT INTO {forecast_tbl} (UKEY, Forecast_w_1y, Forecast_w_2y, Forecast_w_2y_optimal, Weight, FechaFiltro, FechaCreacion)"
-                              f" VALUES ('{UKEY}', {Forecast_w_1y}, {Forecast_w_2y}, {Forecast_w_2y_optimal}, {Weight}, '{FechaFiltro}', '{FechaCreacion}')")
-        conn.commit()
-    except Exception as exc:
-        logging.error(f'Exception while executing SQL statement for table {forecast_tbl}')
-        logging.error(f'\tEXCEPTION INFORMATION:', exc_info=exc)
-        raise
+        try:
+            curr = cursor.execute(f"INSERT INTO {forecast_tbl} (UKEY, Forecast_w_1y, Forecast_w_2y, Forecast_w_2y_optimal, Weight, FechaFiltro, FechaCreacion)"
+                                  f" VALUES ('{UKEY}', {Forecast_w_1y}, {Forecast_w_2y}, {Forecast_w_2y_optimal}, {Weight}, '{FechaFiltro}', '{FechaCreacion}')")
+            conn.commit()
+        except Exception as exc:
+            logging.error(f'Exception while executing SQL statement for table {forecast_tbl}')
+            logging.error(f'\tEXCEPTION INFORMATION:', exc_info=exc)
+            # raise
+
+def daterange(start_date, end_date):
+    current_date = start_date
+    while current_date < end_date:
+        yield current_date
+        current_date += relativedelta(days=1)
 
 if __name__ == '__main__':
-    main()
+    parser = argparse.ArgumentParser(
+        'monthly_views_forecast',
+        description='',
+        epilog=''
+    )
+
+    def end_date(end_date):
+        try:
+            ed = date.fromisoformat(end_date)
+        except ValueError as exc:
+            logging.info(f'end_date = {end_date} not a valid ISO-8601 date. Defaulting to today = {date.today()}')
+            ed = date.today()
+        
+        return ed
+
+    parser.add_argument('-s', '--start-date', type=date.fromisoformat)
+    parser.add_argument('-e', '--end-date', type=date.fromisoformat)
+    parser.add_argument('-v', '--verbose', action='store_true')
+    parser.add_argument('-d', '--debug', action='store_true')
+    
+    args = parser.parse_args()
+
+    main(start_date=args.start_date,
+         end_date=args.end_date,
+         verbose=args.verbose,
+         debug=args.debug)
