@@ -9,6 +9,9 @@ from dateutil.relativedelta import relativedelta
 
 import pyodbc
 
+from Tables import *
+from Predictors import *
+
 # tables
 dly_tbl_pfx = 'GA_DIARIO'
 pm_tbl_pfx = 'GA_MENSUALPARCIAL'
@@ -31,167 +34,6 @@ logging.basicConfig(
     datefmt='%H:%M:%S',
     level=logging.INFO
 )
-
-class Table:
-    def name(self):
-        return self.table_name
-    
-    def __getitem__(self, i):
-        return self.table[i]
-    
-    def __len__(self):
-        return len(self.table)
-    
-    def __str__(self):
-        return f'Table(table_name = \'{self.table_name}\', len = {self.__len__()})'
-
-    def __iter__(self):
-        return iter(self.table)
-
-class DBTableContainer(Table):
-    def __init__(self, table_name, table):
-        self.table_name = table_name
-        
-        i = iter(table) if table else None
-        rt0 = next(i) if i else None
-        
-        self._rt_desc_dict = {
-            col_name : {                    
-                'type' : rem[0],            
-                'internal_size' : rem[2],   
-                'precision' : rem[3],       
-                'scale' : rem[4]            
-            } for (col_name, *rem) in rt0.cursor_description
-        } if rt0 else None
-
-        self.table = DBTableContainer._curate_table(
-            tuple(self._rt_desc_dict), 
-            it.chain((rt0, ), i)
-        ) if rt0 else []
-    
-    @staticmethod
-    def _curate_table(cols_names, r_tbl):
-        curated_tbl = []
-
-        for row in r_tbl:
-            row_dict = {}
-            for i, field in enumerate(row):
-                row_dict[cols_names[i]] = field
-            curated_tbl.append(row_dict)    
-
-        return curated_tbl
-    
-    def column_types(self):
-        return {col_name : d['type'] for col_name, d in self._rt_desc_dict.items()}
-    
-    def column_names(self):
-        return tuple(self._rt_desc_dict.keys())
- 
-class RunningTable(Table):
-    def __init__(self, table_name, table, conv_tbl):
-        """
-        table: has to offer iterable rows, each one of which is a dict with keys being column names
-        conv_tbl: a dict, each key a column name, its value a tuple of type constructors
-        """
-        self.name = table_name
-        self.table = []
-
-        for row in table:
-            self.table.append({col : (conv_tbl[col](row[col]) if col in conv_tbl else row[col]) for col in row})
-
-class SortedTable(RunningTable):
-    def __init__(self, table_name, table, conv_tbl, sort_func=None):
-        super().__init__(table_name, table, conv_tbl)
-        
-        SortedTable._sort(self.table, key=sort_func)
-    
-    @staticmethod
-    def _sort(table, key=None):
-        table.sort(key=key)
-
-    def check_consistency(self):
-        return len({row['FechaFiltro'] for row in self}) == len(self)
-
-class Predictor:
-    def __init__(self, tables):
-        self.tables = tables
-    
-    def __getattr__(self, __name):
-        return self.tables[__name]
-    
-    def predict(self, day=date.today()):
-        return self._predict_w_1y(day)
-    
-    def predict_w(self, day=date.today(), weight=1.0):
-        return self._predict_w_2y_weighted_average(day, weight)
-
-class RatioPredictor(Predictor):
-    def _historic(self, day):
-        month = day.replace(day=1) + relativedelta(months=+1, days=-1)
-
-        partial = [row for row in self.GA_MENSUALPARCIAL if row['FechaFiltro'] == day]
-        monthly = [row for row in self.GA_MENSUAL if row['FechaFiltro'] == month]
-        
-        if len(partial) == 1 and len(monthly) == 1:
-            return (partial[0], monthly[0])
-        else:
-            logging.error(f'Something went wrong when retrieving historic values')
-            logging.error(f'\tday   = {day}')
-            logging.error(f'\tmonth = {month}')
-            logging.error(f'\t')
-            logging.error(f'\tlen(partial) == {len(partial)}')
-            logging.error(f'\tpartial == {partial}')
-            logging.error(f'')
-            logging.error(f'\tlen(monthly) == {len(monthly)}')
-            logging.error(f'\tmonthly == {monthly}')
-            logging.error(f'\t')
-            return (None, None)
-
-    def _ratio(self, day):
-        # partial, monthly = self._historic(day - relativedelta(years=1))
-        partial, monthly = self._historic(day) # - relativedelta(years=1))
-        
-        if partial and monthly:
-            return partial['Users']/monthly['Users']
-        else:
-            logging.error(f'Unable to calculate partial_montly to monthly ratio')
-            logging.error(f'\tday == {day}')
-            logging.error(f'\t')
-            return None
-
-    def _predict_w_1y(self, day):
-        return self._predict_w_2y_weighted_average(day, 1.0)
-    
-    def _predict_w_2y_weighted_average(self, day, weight):
-        r1ya = self._ratio(day - relativedelta(years=1))
-        r2ya = self._ratio(day - relativedelta(years=2))
-
-        if r1ya and r2ya: 
-            w_avg = weight * r1ya + (1 - weight) * r2ya 
-        else:
-            if r1ya:
-                w_avg = r1ya
-            else:
-                logging.error(f'In calculating "weighted_average" something went wrong:')
-                logging.error(f'\tr1ya == {r1ya}')
-                logging.error(f'\tr2ya == {r2ya}')
-                return None
-
-        partial_for_day = [row for row in self.GA_MENSUALPARCIAL if row['FechaFiltro'] == day]
-
-        if partial_for_day:
-            partial_for_day = partial_for_day[0]
-            partial = partial_for_day['Users']
-            return partial/w_avg
-        else:
-            logging.error(f'In calculating "weighted_average" something went wrong:')
-            logging.error(f'\t')
-            logging.error(f'\tr1ya == {r1ya}')
-            logging.error(f'\tr2ya == {r2ya}')
-            logging.error(f'\t')
-            logging.error(f'\tpartial_for_day == {partial_for_day}')
-            logging.error(f'\t')
-            return None
 
 def main(start_date=None, end_date=None, verbose=None, debug=None):
     print(f'start_date : {start_date}')
@@ -251,33 +93,75 @@ def main(start_date=None, end_date=None, verbose=None, debug=None):
         logging.info(f'\tRows on Running Table {db_table_name} :: {len(running_tables[db_table_name])}')
         logging.info(f'\tRunning Table {db_table_name} :: {"is" if running_tables[db_table_name].check_consistency() else "IS NOT"} consistent')
 
-    predictor = RatioPredictor(running_tables)
- 
+    
+
+    one_year_predictor = RatioOneYearPredictor(running_tables)
+    two_year_predictor = RatioTwoYearAvgPredictor(running_tables)
+    two_avgd_predictor = RatioTwoYearWghtdAvgPredictor(running_tables)
+    past_mon_predictor = PastMonthPredictor(running_tables)
+
+
+    # RatioTwoYearWghtdAvgPredictor need to have the w :: weight parameter adjusted so as to minimize the sum of the errors-sqrd
+    
     # -------------------------------------------------------------------------
-    for predict_for_date in daterange(
+    for date_to_predict_for in daterange(
         start_date, 
         end_date
     ):
-        # predict_for_date = running_tables['GA_DIARIO'][-2]['FechaFiltro']
-
         # UKEY = date.today().strftime('%Y%m%d')
-        UKEY = predict_for_date.strftime('%Y%m%d')
+        UKEY = date_to_predict_for.strftime('%Y%m%d')
 
-        Forecast_w_1y = predictor.predict(predict_for_date)
-        Forecast_w_2y = predictor.predict_w(predict_for_date, 0.5)
+        monthly = one_year_predictor.monthly(date_to_predict_for)
+
+        Forecast_w_1y = one_year_predictor.predict(date_to_predict_for)
+        abs_err_w_1y = one_year_predictor.abs_err(date_to_predict_for)
+        rel_err_w_1y = one_year_predictor.rel_err(date_to_predict_for)
+        per_err_w_1y = one_year_predictor.per_err(date_to_predict_for)
+
+        Forecast_w_2y = two_year_predictor.predict(date_to_predict_for)
+        abs_err_w_2y = two_year_predictor.abs_err(date_to_predict_for)
+        rel_err_w_2y = two_year_predictor.rel_err(date_to_predict_for)
+        per_err_w_2y = two_year_predictor.per_err(date_to_predict_for)
+
         Forecast_w_2y_optimal = 0   # TODO -- Placeholder: predictor.predict_w(last_valid_date, w) where w better adjust for a given period
+        abs_err_w_2y_optimal = 0
+        rel_err_w_2y_optimal = 0
+        per_err_w_2y_optimal = 0
         Weight = 0.0    
 
+        # coso._historic_prev_month(date_to_predict_for)
+        
+        Forecast_w_past_mon = past_mon_predictor.predict(date_to_predict_for)
+        abs_err_w_past_mon = past_mon_predictor.abs_err(date_to_predict_for)
+        rel_err_w_past_mon = past_mon_predictor.rel_err(date_to_predict_for)
+        per_err_w_past_mon = past_mon_predictor.per_err(date_to_predict_for)
+
         # FechaFiltro = date.today().replace(day=1) + relativedelta(months=+1, days=-1)
-        FechaFiltro = (_ := predict_for_date).replace(day=1) + relativedelta(months=+1) - relativedelta(days=1)
+        FechaFiltro = (_ := date_to_predict_for).replace(day=1) + relativedelta(months=+1) - relativedelta(days=1)
         FechaCreacion = datetime.now().isoformat(timespec='milliseconds')
     
         if verbose:
             print(f"('{UKEY}', {Forecast_w_1y}, {Forecast_w_2y}, {Forecast_w_2y_optimal}, {Weight}, '{FechaFiltro}', '{FechaCreacion}')")
+            print(f"(abs_err_w_1y, rel_err_w_1y) == ({abs_err_w_1y}, {rel_err_w_1y})")
+            print(f"(abs_err_w_2y, rel_err_w_2y) == ({abs_err_w_2y}, {rel_err_w_2y})")
 
         try:
-            curr = cursor.execute(f"INSERT INTO {forecast_tbl} (UKEY, Forecast_w_1y, Forecast_w_2y, Forecast_w_2y_optimal, Weight, FechaFiltro, FechaCreacion)"
-                                  f" VALUES ('{UKEY}', {Forecast_w_1y}, {Forecast_w_2y}, {Forecast_w_2y_optimal}, {Weight}, '{FechaFiltro}', '{FechaCreacion}')")
+            # curr = cursor.execute(f"INSERT INTO {forecast_tbl} (UKEY, Forecast_w_1y, Forecast_w_2y, Forecast_w_2y_optimal, Weight, FechaFiltro, FechaCreacion) "
+            #                       f"VALUES ('{UKEY}', {Forecast_w_1y}, {Forecast_w_2y}, {Forecast_w_2y_optimal}, {Weight}, '{FechaFiltro}', '{FechaCreacion}')")
+            
+            curr = cursor.execute(f"INSERT INTO {forecast_tbl} "
+                                      f"(UKEY, monthly, "
+                                      f"Forecast_w_1y, abs_err_w_1y, rel_err_w_1y, per_err_w_1y, " 
+                                      f"Forecast_w_2y, abs_err_w_2y, rel_err_w_2y, per_err_w_2y, "
+                                      f"Forecast_w_2y_optimal, abs_err_w_2y_optimal, rel_err_w_2y_optimal, per_err_w_2y_optimal, "
+                                      f"Forecast_w_past_mon, abs_err_w_past_mon, rel_err_w_past_mon, per_err_w_past_mon, "
+                                      f"Weight, FechaFiltro, FechaCreacion)"
+                                  f"VALUES ('{UKEY}', {monthly}, "
+                                      f"{Forecast_w_1y}, {abs_err_w_1y}, {rel_err_w_1y}, {per_err_w_1y}, "
+                                      f"{Forecast_w_2y}, {abs_err_w_2y}, {rel_err_w_2y}, {per_err_w_2y}, "
+                                      f"{Forecast_w_2y_optimal}, {abs_err_w_2y_optimal}, {rel_err_w_2y_optimal}, {per_err_w_2y_optimal}, "
+                                      f"{Forecast_w_past_mon}, {abs_err_w_past_mon}, {rel_err_w_past_mon}, {per_err_w_past_mon}, "
+                                      f"{Weight}, '{FechaFiltro}', '{FechaCreacion}')")
             conn.commit()
         except Exception as exc:
             logging.error(f'Exception while executing SQL statement for table {forecast_tbl}')
